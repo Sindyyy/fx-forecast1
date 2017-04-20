@@ -1,109 +1,121 @@
-# install.packages("rugarch")
+library(forecast)
 library(rugarch)
-# mydf = read.csv("TWDUSD.csv")
-setwd("/fap02/Home/strategy.intern.6/Desktop/FX Forcast")
-mydf = read.csv("USDTWD_21factors_6tech..xlsx")
-price = mydf$USDTWD.REGN.Curncy
-
-preprocess <- function(mydf, lookback){
-  p = mydf$USDTWD.REGN.Curncy
-  xReg = mydf[,c(2:(ncol(mydf)))]
-  ret = log(p[(lookback+1):nrow(mydf)]/p[1:nrow(mydf)-lookback]) 
-  fac = xReg[1:nrow(mydf)-lookback, ]
-  return (cbind(fac, ret))
-
-}
-dat = preprocess(mydf, 1)[5500:5900,] # try first 500 days
-fac = dat[,1:(ncol(dat)-1)]
-returns = dat[,ncol(dat)]
-
-
-window.length <- 390
-act.ret = returns[(window.length+1):(length(returns))]
-forecasts.length <- length(returns) - window.length
-forecasts <- vector(mode="numeric", length=forecasts.length) 
-directions <- vector(mode="numeric", length=forecasts.length) 
-p.val <- vector(mode="numeric", length=forecasts.length) 
-
-# loop through every trading day, estimate optimal model parameters from rolling window
-# and predict next day's return
-for (i in 0:(forecasts.length-1)) {
-  roll.returns <- returns[(1+i):(window.length + i)] # create rolling window
-  reg.train =  fac[(1+i):(window.length + i),]
-  reg.test = fac[window.length+i+1,]
-  final.aic <- Inf
-  final.order <- c(0,0,0)
-  # estimate optimal ARIMA model order
-  for (p in 0:5) for (q in 0:5) { # limit possible order to p,q <= 5
-    if (p == 0 && q == 0) next # p and q can't both be zero
-    arimaFit <- tryCatch( arima(roll.returns, order = c(p,0,q)), xreg = reg.train,
-                          error = function( err ) FALSE,
-                          warning = function( err ) FALSE )
-    if (!is.logical( arimaFit)) {
-      current.aic <- AIC(arimaFit)
-      if (current.aic < final.aic) { # retain order if AIC is reduced
-        final.aic <- current.aic
-        final.order <- c(p,0,q)
-        final.arima <- arima(roll.returns, order = final.order)
+#library(fGarch)
+arima.garch.predict<- function(RET = ret, REG=NULL, STEP = 100, TEST.SIZE = 30, TRAIN.SIZE = 150, ROLL = 10) {
+  hit.rates = matrix(0, nrow = 10, ncol = 1)
+  rets = matrix(0, nrow = 10, ncol = 1)
+  count = 0
+  istart = 1
+  for (i in 1:ROLL) {
+      reg = REG[istart:(istart+TRAIN.SIZE+TEST.SIZE-1), ]
+      ret = RET[istart:(istart+TRAIN.SIZE+TEST.SIZE-1) ]
+      reg.train = head( reg, TRAIN.SIZE)
+      reg.predict = tail( reg, TEST.SIZE) 
+      train = head( ret, TRAIN.SIZE )
+      test = tail( ret, TEST.SIZE )
+      # Fit the ARIMA model
+      final.aic <- Inf
+      final.order <- c(0,0,0)
+      for (p in 0:3) for (q in 0:3) {
+        if ( p == 0 && q == 0) {
+          next}
+        arimaFit =  arima(train, order=c(p, 0, q),xreg = reg.train)
+        if( !is.logical( arimaFit ) ) {
+          current.aic <- AIC(arimaFit)
+          if (current.aic < final.aic) {
+            final.aic <- current.aic
+            final.order <- c(p, 0, q)
+            final.arima <- arima(train, order=final.order, xreg = reg.train)
+          }
+        } else {
+          next
+        }
       }
-    }
-    else next 
-  }
-  print("done arima")
-  # specify and fit the GARCH model
-  
-  final.aic <- Inf
-    for (a in 1:2) for (b in 1:2) { # limit possible order to p,q <= 5
-      print("a is :")
-      print(a)
-      spec = ugarchspec(variance.model <- list(garchOrder=c(a,b)),
-                        mean.model = list(armaOrder = final.order[1], final.order[3], include.mean = TRUE，
-                             external.regressors = reg.train),
-                       # mean.model <- list(
-                        #  armaOrder <- c(final.order[1], final.order[3]), include.mean = T),
-                        distribution.model = "norm")
+      
+      # Specify and fit the GARCH model
+      final.llh = -3000
+      for (p in 1:1) for ( q in 1:1 ) {
+        spec = ugarchspec(
+          variance.model=list(garchOrder=c(p,q)),
+          mean.model=list(armaOrder=c(final.order[1], final.order[3]), external.regressors =  reg.train, include.mean=T))
+        fit =  ugarchfit(spec, train, solver = 'hybrid')
+        str(fit)
+        print("LLH")
+        llh = fit@fit$LLH
+        print(  llh )
+        if  (final.llh < llh) {
+          final.llh = llh
+          final.fit = fit}
+      }
+
+
+      fore = ugarchforecast(final.fit, n.ahead=TEST.SIZE, external.forecasts = list(mregfor = reg.predict))
+      predict.ret = fore@forecast$seriesFor
+
+
+      #########################################################################################
+
+      hit.rates[i] = mean(sign(predict.ret) == sign(test))
       print("here")
-      fit = tryCatch(ugarchfit(spec, roll.returns, solver = 'hybrid'), error = function(e) e, warning = function(w) w)
+      print (test)
+      print (predict.ret)
+      rets[i] = sum(sign(predict.ret)*test)*365/TEST.SIZE
+      print(rets[i])
+      istart = istart +STEP
+    }
     
-    if (!is.logical( fit)) {
-      current.aic <- AIC(fit)
-      if (current.aic < final.aic) { # retain order if AIC is reduced
-        final.aic <- current.aic
-        final.fit <- fit
-      }
-    }
-    else next 
-    }
-    fit = final.fit
-  # calculate next day prediction from fitted mode
-  # model does not always converge - assign value of 0 to prediction and p.val in this case
-  if (is(fit, "warning")) {
-    forecasts[i+1] <- 0 
-    print(0)
-    p.val[i+1] <- 0
-  }
-  else {
-    next.day.fore = ugarchforecast(fit, n.ahead = 1, external.forecastslist(mregfor = reg.test, vregfor = NULL))
-    x = next.day.fore@forecast$seriesFor
-    directions[i+1] <- ifelse(x[1] > 0, 1, -1) # directional prediction only
-    forecasts[i+1] <- x[1] # actual value of forecast
-    print(i+1)
-    print(forecasts[i+1])
-    # analysis of residuals
-    # resid <- as.numeric(residuals(fit, standardize = TRUE))
-    # ljung.box <- Box.test(resid, lag = 20, type = "Ljung-Box", fitdf = 0)
-    # p.val[i+1] <- ljung.box$p.value
-  }
+  
+  result = data.frame(cbind(hit.rates, rets)) 
+  colnames(result) = c("hit.rates","returns")
+  return(result)
 }
-correct.rate = mean(sign(forecasts)==sign(act.ret), na.rm = TRUE)
 
-dates <- mydf[, 1] 
-forecasts.ts <- xts(forecasts, dates[(window.length):length(returns)])
-# create lagged series of forecasts and sign of forecast
-ag.forecasts <- Lag(forecasts.ts, 1)
-ag.direction <- ifelse(ag.forecasts > 0, 1, ifelse(ag.forecasts < 0, -1, 0))
+mydf = read.table("lookback1.txt", header = T, sep = " ")
+mydf = mydf[mydf$ret!=0,]
+mydf.pca = prcomp(mydf[,4:ncol(mydf)], center = TRUE, scale. = TRUE)
+vols=cumsum((mydf.pca$sdev)^2) / sum(mydf.pca$sdev^2)
+plot(vols, ylab = "%vol explained", xlab = "principle components")
+reg.pca = mydf.pca$x[,1:6]
+rates.with.reg = arima.garch.predict(RET=mydf$ret, REG = reg.pca, TRAIN.SIZE =320,TEST.SIZE = 150, ROLL = 10)
 
-# Create the ARIMA/GARCH returns for the directional system
-ag.direction.returns <- ag.direction * returns[(window.length):length(returns)]
-ag.direction.returns[1] <- 0 # remove NA
+# 320 +30
+show.data <- function(price, period, train.size=320, test.size = 30, step =100 ){
+
+  start = (period-1)*step+1
+  end = start+train.size+test.size
+  dat = price[start:end]
+  return(dat)
+  
+}
+price = mydf$price
+dat2 = show.data(price=price, period = 2)
+dat9 = show.data(price=price, period = 9)
+dat10 = show.data(price=price, period = 10)
+
+
+dat1= show.data(price=price, period = 1)
+dat7 = show.data(price=price, period = 7)
+
+lapply(list(dat2,dat9,dat10), var)
+lapply(list(dat1,dat7), var)
+par(mfrow=c(2,3))
+plot(dat2)
+plot(dat9)
+plot(dat10)
+plot(show.data(price=price, period = 1))
+plot(show.data(price=price, period = 7))
+
+
+
+hit.rates = rates.with.reg[,1]
+returns = rates.with.reg[,2]
+hit.mean = mean(hit.rates)
+return.mean = mean(returns)
+
+hit.mean
+return.mean
+sharpe
+sharpe = return.mean/ sqrt(var(returns)) 
+returns[1:5]
+
 
